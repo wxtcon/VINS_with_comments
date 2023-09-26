@@ -86,19 +86,21 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     TicToc t_r;
     cur_time = _cur_time;
 
-    if (EQUALIZE)
+    // 1. 直方图均衡化
+    if (EQUALIZE) //判断是否对图像进行自适应直方图均衡化
     {
-        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8)); //对图像进行自适应直方图均衡化，对比度限制3.0，局部均衡化的区域大小8x8
         TicToc t_c;
-        clahe->apply(_img, img);
+        clahe->apply(_img, img); //应用CLAHE（Contrast Limited Adaptive Histogram Equalization）算法到图像 _img 上，并将结果存储在图像img
         ROS_DEBUG("CLAHE costs: %fms", t_c.toc());
     }
     else
         img = _img;
 
-    if (forw_img.empty())
+    //2. 首帧判断和对的forw_img更新 
+    if (forw_img.empty())   //如果当前帧的图像数据forw_img为空，说明当前是第一次读入图像数据
     {
-        prev_img = cur_img = forw_img = img;
+        prev_img = cur_img = forw_img = img; //将读入的图像赋给当前帧forw_img、prev_img、cur_img，这是为了避免后面使用到这些数据时，它们是空的
     }
     else
     {
@@ -107,6 +109,8 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 
     forw_pts.clear();
 
+    //3. 光流追踪和失败点剔除
+    //在这里实现了3大功能：光流追踪，outlier的剔除，并且不同容器里的数据仍然是对齐的！
     if (cur_pts.size() > 0)
     {
         TicToc t_o;
@@ -126,15 +130,18 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
         ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
     }
 
-    for (auto &n : track_cnt)
-        n++;
+    //4. 更新当前特征点被追踪到的次数
+    for (auto &n : track_cnt) //光流追踪成功,特征点被成功跟踪的次数就加1
+        n++;                  //数值代表被追踪的次数，数值越大，说明被追踪的就越久
 
+    //5. 通过基本矩阵剔除外点rejectWithF()
     if (PUB_THIS_FRAME)
     {
-        rejectWithF();
+        rejectWithF(); //通过基本矩阵剔除outliers，主要是利用了cv::findFundamentalMat()这个函数来进一步剔除outlier
+                       //如果函数传入的是归一化坐标，那么得到的是本质矩阵E，如果传入的是像素坐标，那么得到的是基础矩阵F
         ROS_DEBUG("set mask begins");
-        TicToc t_m;
-        setMask();
+        TicToc t_m;    
+        setMask();     //对跟踪点进行排序并去除密集点
         ROS_DEBUG("set mask costs %fms", t_m.toc());
 
         ROS_DEBUG("detect feature begins");
@@ -168,7 +175,13 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
     prev_time = cur_time;
 }
 
-void FeatureTracker::rejectWithF()
+// 这一段代码的逻辑，我的理解，是先把特征点坐标(像素坐标)转为归一化坐标，再转回到像素坐标，
+// 然后再用findFundamentalMat()找outlier。它之所以这么做，是因为需要一个去畸变的过程，
+// 在m_camera->liftProjective()里实现，m_camera是定义在camera.h的一个父类的对象，
+// 下面有多个相机模型的子类，例如在PinholeCamera.cc里，这里面就重写liftProjective()了方法，实现了去畸变的功能。
+
+原文链接：https://blog.csdn.net/iwanderu/article/details/104618993
+void FeatureTracker::rejectWithF() //通过基本矩阵（F）去除外点outliers
 {
     if (forw_pts.size() >= 8)
     {

@@ -6,10 +6,18 @@
 #include <ceres/ceres.h>
 using namespace Eigen;
 
-class IntegrationBase
+class IntegrationBase //积分基类
 {
   public:
     IntegrationBase() = delete;
+    
+
+    // 这个构造函数读取了4个i时刻的初始值(共12个变量)，
+    // 用_acc_0初始化acc_0和linearized_acc(分别是i时刻和bk时刻)，
+    // 用_gyr_0初始化gyr_0和linearized_gyr(分别是i时刻和bk时刻)，
+    // 用15x15的单位矩阵初始化J，
+    // 用15x15的0矩阵初始化协方差传递矩阵。
+    // 用yaml文件里读取的IMU噪声参数初始化18*18的噪声矩阵。
     IntegrationBase(const Eigen::Vector3d &_acc_0, const Eigen::Vector3d &_gyr_0,
                     const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
         : acc_0{_acc_0}, gyr_0{_gyr_0}, linearized_acc{_acc_0}, linearized_gyr{_gyr_0},
@@ -35,14 +43,15 @@ class IntegrationBase
         propagate(dt, acc, gyr);
     }
 
+    //重传播，它的使用次数较少，针对的是从bk到bk+1的PVQ传播矫正和误差传递矫正。
     void repropagate(const Eigen::Vector3d &_linearized_ba, const Eigen::Vector3d &_linearized_bg)
     {
-        sum_dt = 0.0;
-        acc_0 = linearized_acc;
-        gyr_0 = linearized_gyr;
-        delta_p.setZero();
-        delta_q.setIdentity();
-        delta_v.setZero();
+        sum_dt = 0.0; //the gap between IMU plot
+        acc_0 = linearized_acc; //a at bk in bk coordinate
+        gyr_0 = linearized_gyr; //w at bk in bk coordinate
+        delta_p.setZero(); //alpha
+        delta_q.setIdentity(); //gama trans bi to bk
+        delta_v.setZero(); //beta
         linearized_ba = _linearized_ba;
         linearized_bg = _linearized_bg;
         jacobian.setIdentity();
@@ -60,23 +69,28 @@ class IntegrationBase
                             Eigen::Vector3d &result_linearized_ba, Eigen::Vector3d &result_linearized_bg, bool update_jacobian)
     {
         //ROS_INFO("midpoint integration");
+        //IMU预积分
         Vector3d un_acc_0 = delta_q * (_acc_0 - linearized_ba);
         Vector3d un_gyr = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
         result_delta_q = delta_q * Quaterniond(1, un_gyr(0) * _dt / 2, un_gyr(1) * _dt / 2, un_gyr(2) * _dt / 2);
         Vector3d un_acc_1 = result_delta_q * (_acc_1 - linearized_ba);
-        Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
-        result_delta_p = delta_p + delta_v * _dt + 0.5 * un_acc * _dt * _dt;
-        result_delta_v = delta_v + un_acc * _dt;
+        Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1); //average mid
+        result_delta_p = delta_p + delta_v * _dt + 0.5 * un_acc * _dt * _dt; //alpha(i+1)
+        result_delta_v = delta_v + un_acc * _dt; //beta(i+1)
         result_linearized_ba = linearized_ba;
         result_linearized_bg = linearized_bg;         
 
+        //以下代码求解误差传递矩阵
+        //求误差传递函数的2个目的，第一个是在求α、β、γ的值的时候给不同bias提供相应的Jacobian；第二个目的是给后端优化部分中IMU部分提供信息矩阵。
         if(update_jacobian)
         {
+            //这些量都是给F的填充作辅助
             Vector3d w_x = 0.5 * (_gyr_0 + _gyr_1) - linearized_bg;
             Vector3d a_0_x = _acc_0 - linearized_ba;
             Vector3d a_1_x = _acc_1 - linearized_ba;
             Matrix3d R_w_x, R_a_0_x, R_a_1_x;
 
+            //构造F矩阵
             R_w_x<<0, -w_x(2), w_x(1),
                 w_x(2), 0, -w_x(0),
                 -w_x(1), w_x(0), 0;
@@ -127,11 +141,12 @@ class IntegrationBase
 
     }
 
-    void propagate(double _dt, const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1)
+    //传播，使用次数更多，针对的是bk和bk+1内部的i时刻到i+1时刻的PVQ传播和误差传递。
+    void propagate(double _dt, const Eigen::Vector3d &_acc_1, const Eigen::Vector3d &_gyr_1) 
     {
         dt = _dt;
-        acc_1 = _acc_1;
-        gyr_1 = _gyr_1;
+        acc_1 = _acc_1; //a at time t=t+dt
+        gyr_1 = _gyr_1; //w at time t=t+dt
         Vector3d result_delta_p;
         Quaterniond result_delta_q;
         Vector3d result_delta_v;
@@ -145,23 +160,25 @@ class IntegrationBase
 
         //checkJacobian(_dt, acc_0, gyr_0, acc_1, gyr_1, delta_p, delta_q, delta_v,
         //                    linearized_ba, linearized_bg);
-        delta_p = result_delta_p;
-        delta_q = result_delta_q;
-        delta_v = result_delta_v;
+        delta_p = result_delta_p; //alpha_i+1
+        delta_q = result_delta_q; //gama_i+1 from i+1 coordinate to bk
+        delta_v = result_delta_v; //beta_i+1
         linearized_ba = result_linearized_ba;
         linearized_bg = result_linearized_bg;
         delta_q.normalize();
-        sum_dt += dt;
-        acc_0 = acc_1;
-        gyr_0 = gyr_1;  
+        sum_dt += dt;  //time for bk to bk+1
+        acc_0 = acc_1; //a_i+1 at bi+1 coordinate
+        gyr_0 = gyr_1; //w_i+1   
      
     }
 
     Eigen::Matrix<double, 15, 1> evaluate(const Eigen::Vector3d &Pi, const Eigen::Quaterniond &Qi, const Eigen::Vector3d &Vi, const Eigen::Vector3d &Bai, const Eigen::Vector3d &Bgi,
                                           const Eigen::Vector3d &Pj, const Eigen::Quaterniond &Qj, const Eigen::Vector3d &Vj, const Eigen::Vector3d &Baj, const Eigen::Vector3d &Bgj)
     {
+        ///get IMU residuals   Qi transform coordinate from i to w; Vi volosity at time i in w coordinate
         Eigen::Matrix<double, 15, 1> residuals;
 
+        // O_P = 0,O_R = 3, O_V = 6, O_BA = 9, O_BG = 12
         Eigen::Matrix3d dp_dba = jacobian.block<3, 3>(O_P, O_BA);
         Eigen::Matrix3d dp_dbg = jacobian.block<3, 3>(O_P, O_BG);
 
@@ -173,10 +190,12 @@ class IntegrationBase
         Eigen::Vector3d dba = Bai - linearized_ba;
         Eigen::Vector3d dbg = Bgi - linearized_bg;
 
+        // IMU预积分的结果,消除掉acc bias和gyro bias的影响, 对应IMU model中的\hat{\alpha},\hat{\beta},\hat{\gamma}
         Eigen::Quaterniond corrected_delta_q = delta_q * Utility::deltaQ(dq_dbg * dbg);
         Eigen::Vector3d corrected_delta_v = delta_v + dv_dba * dba + dv_dbg * dbg;
         Eigen::Vector3d corrected_delta_p = delta_p + dp_dba * dba + dp_dbg * dbg;
 
+        // IMU项residual计算,输入参数是状态的估计值, 上面correct_delta_*是预积分值, 二者求'diff'得到residual.
         residuals.block<3, 1>(O_P, 0) = Qi.inverse() * (0.5 * G * sum_dt * sum_dt + Pj - Pi - Vi * sum_dt) - corrected_delta_p;
         residuals.block<3, 1>(O_R, 0) = 2 * (corrected_delta_q.inverse() * (Qi.inverse() * Qj)).vec();
         residuals.block<3, 1>(O_V, 0) = Qi.inverse() * (G * sum_dt + Vj - Vi) - corrected_delta_v;

@@ -41,29 +41,36 @@ int FeatureManager::getFeatureCount()
     return cnt;
 }
 
-
+//关键帧判断
 bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
 {
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
-    double parallax_sum = 0;
-    int parallax_num = 0;
-    last_track_num = 0;
+    double parallax_sum = 0; //总平行度
+    int parallax_num = 0;  //平行特征点数
+    last_track_num = 0; //统计在滑窗中的特征点有多少个在当前帧中继续被追踪到了
+    
+    //遍历当前帧的每一个特征点
     for (auto &id_pts : image)
     {
+        //把当前特征点封装成一个FeaturePerFrame对象
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
 
-        int feature_id = id_pts.first;
+        int feature_id = id_pts.first; //获取当前帧的feature_id
+        //在滑窗的所有特征点中，看看能不能找到当前这个特征点
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
-                          {
+                          { //是find的一个谓词判断版本，它利用返回布尔值的谓词判断pred，检查迭代器区间[first, last)上的每一个元素，
+                            //如果迭代器iter满足pred(*iter) == true，表示找到元素并返回迭代器值iter；未找到元素，则返回last。
             return it.feature_id == feature_id;
                           });
 
+        //如果这个特征点是一个新的特征(在特征点库里没有找到),那么就把它加入到滑窗的特征点库里
         if (it == feature.end())
         {
             feature.push_back(FeaturePerId(feature_id, frame_count));
             feature.back().feature_per_frame.push_back(f_per_fra);
         }
+        //如果这个特征在滑窗中已经被观测到过，那么就补充上这个特征点在当前帧的数据，并且把共视点统计数+1
         else if (it->feature_id == feature_id)
         {
             it->feature_per_frame.push_back(f_per_fra);
@@ -71,24 +78,30 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         }
     }
 
-    if (frame_count < 2 || last_track_num < 20)
+    if (frame_count < 2 || last_track_num < 20) //如果总共2帧，或者说共视点<20，那么说明次新帧是关键帧，marg_old
         return true;
 
-    for (auto &it_per_id : feature)
+    for (auto &it_per_id : feature) //遍历滑窗中的每一个特征点
     {
+        //如果当前特征点在当前帧-2以前出现过而且至少在当前帧-1还在，那么他就是平行特征点
         if (it_per_id.start_frame <= frame_count - 2 &&
             it_per_id.start_frame + int(it_per_id.feature_per_frame.size()) - 1 >= frame_count - 1)
         {
             parallax_sum += compensatedParallax2(it_per_id, frame_count);
-            parallax_num++;
+            parallax_num++; //平行特征点数
         }
     }
 
-    if (parallax_num == 0)
+    // 这一部分代码完全在秦通大神的IV.A部分体现了。
+    // 秦神在这部分里写了2个判断关键帧的判断指标，第一个是“the average parallax apart from the previous keyframe”，
+    // 对应着代码中parallax_num和parallax_sum / parallax_num；
+    // 第二个是“If the number of tracked features goes below a certain threshold, we treat this frame as a new keyframe”，
+    // 对应着代码里的last_track_num。注意，这部分里还有一个函数是compensatedParallax2()，用来计算当前特征点的视差。
+    if (parallax_num == 0) //判断标准1:平行特征点数为0
     {
         return true;
     }
-    else
+    else //判断标准2:平均平行度小于threshold
     {
         ROS_DEBUG("parallax_sum: %lf, parallax_num: %d", parallax_sum, parallax_num);
         ROS_DEBUG("current parallax: %lf", parallax_sum / parallax_num * FOCAL_LENGTH);

@@ -189,22 +189,42 @@ namespace cv {
     }
 }
 
-
+/**
+ *  Mat cv::findFundamentalMat(  返回通过RANSAC算法求解两幅图像之间的本质矩阵E
+ *      nputArray  points1,             第一幅图像点的数组
+ *      InputArray  points2,            第二幅图像点的数组
+ *      int     method = FM_RANSAC,     RANSAC 算法
+ *      double  param1 = 3.,            点到对极线的最大距离，超过这个值的点将被舍弃
+ *      double  param2 = 0.99,          矩阵正确的可信度
+ *      OutputArray mask = noArray()    输出在计算过程中没有被舍弃的点
+ *  ) 
+ */  
+/**
+ *  int cv::recoverPose (   通过本质矩阵得到Rt，返回通过手性校验的内点个数
+ *      InputArray  E,              本质矩阵
+ *      InputArray  points1,        第一幅图像点的数组
+ *      InputArray  points2,        第二幅图像点的数组
+ *      InputArray  cameraMatrix,   相机内参
+ *      OutputArray     R,          第一帧坐标系到第二帧坐标系的旋转矩阵
+ *      OutputArray     t,          第一帧坐标系到第二帧坐标系的平移向量
+ *      InputOutputArray    mask = noArray()  在findFundamentalMat()中没有被舍弃的点
+ *  )  
+ */ 
 bool MotionEstimator::solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &corres, Matrix3d &Rotation, Vector3d &Translation)
 {
     if (corres.size() >= 15)
     {
-        vector<cv::Point2f> ll, rr;
+        vector<cv::Point2f> ll, rr; 
         for (int i = 0; i < int(corres.size()); i++)
         {
             ll.push_back(cv::Point2f(corres[i].first(0), corres[i].first(1)));
             rr.push_back(cv::Point2f(corres[i].second(0), corres[i].second(1)));
         }
-        cv::Mat mask;
-        cv::Mat E = cv::findFundamentalMat(ll, rr, cv::FM_RANSAC, 0.3 / 460, 0.99, mask);
+        cv::Mat mask; //因为这里的ll,rr是归一化坐标，所以得到的是本质矩阵
+        cv::Mat E = cv::findFundamentalMat(ll, rr, cv::FM_RANSAC, 0.3 / 460, 0.99, mask); //返回通过RANSAC算法求解两幅图像之间的本质矩阵E
         cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
         cv::Mat rot, trans;
-        int inlier_cnt = cv::recoverPose(E, ll, rr, cameraMatrix, rot, trans, mask);
+        int inlier_cnt = cv::recoverPose(E, ll, rr, cameraMatrix, rot, trans, mask); //通过本质矩阵得到Rt，返回通过手性校验的内点个数
         //cout << "inlier_cnt " << inlier_cnt << endl;
 
         Eigen::Matrix3d R;

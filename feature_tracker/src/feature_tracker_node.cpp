@@ -47,8 +47,8 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         last_image_time = img_msg->header.stamp.toSec();
         return;
     }
-    // detect unstable camera stream
-    if (img_msg->header.stamp.toSec() - last_image_time > 1.0 || img_msg->header.stamp.toSec() < last_image_time)
+    // detect unstable camera stream 
+    if (img_msg->header.stamp.toSec() - last_image_time > 1.0 || img_msg->header.stamp.toSec() < last_image_time) //对于时间戳错乱的帧，重新初始化
     {
         ROS_WARN("image discontinue! reset the feature tracker!");
         first_image_flag = true; 
@@ -60,24 +60,29 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         return;
     }
     last_image_time = img_msg->header.stamp.toSec();
-    // frequency control
-    if (round(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time)) <= FREQ)
+    
+    // 2. frequency control
+    if (round(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time)) <= FREQ) //要想发布图像帧，那么实际频率要比设定值小
     {
-        PUB_THIS_FRAME = true;
+        PUB_THIS_FRAME = true; //发布特征点
         // reset the frequency control
-        if (abs(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time) - FREQ) < 0.01 * FREQ)
+        if (abs(1.0 * pub_count / (img_msg->header.stamp.toSec() - first_image_time) - FREQ) < 0.01 * FREQ)// 处理累计误差，如果实际频率与设定频率的累积误差大于0.01了，就不能发布这一帧
         {
-            first_image_time = img_msg->header.stamp.toSec();
-            pub_count = 0;
+            first_image_time = img_msg->header.stamp.toSec(); 
+            pub_count = 0; //pub_count最大只能是1，因为只要能发布一帧，这个数就会被清0
         }
     }
-    else
+    else   //如果实际发布频率大于设定值，肯定就不发了
         PUB_THIS_FRAME = false;
 
+    //3. 图像的格式调整和图像读取
+    //读取sensor_msgs::Image img的数据，并转为MONO8格式，用cv::Mat show_img接收
+    //构建了CV:Mat与sensor_masg::Image之间的桥梁。
+    //注意，img_msg或img都是sensor_msg格式的，我们需要一个桥梁，转换为CV::Mat格式的数据，以供后续图像处理。
     cv_bridge::CvImageConstPtr ptr;
-    if (img_msg->encoding == "8UC1")
+    if (img_msg->encoding == "8UC1") //8位1通道，即：灰度图
     {
-        sensor_msgs::Image img;
+        sensor_msgs::Image img;  //估计是为了将const的img_msg转换为非const的img
         img.header = img_msg->header;
         img.height = img_msg->height;
         img.width = img_msg->width;
@@ -85,21 +90,26 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         img.step = img_msg->step;
         img.data = img_msg->data;
         img.encoding = "mono8";
-        ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8);
+        ptr = cv_bridge::toCvCopy(img, sensor_msgs::image_encodings::MONO8); ////将图像编码8UC1转换为mono8,即存储下来的图像为单色，8Bit的图片，一般是bmp，jpeg等
     }
     else
         ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
 
+    
     cv::Mat show_img = ptr->image;
     TicToc t_r;
+
+    //对最新帧forw的特征点的提取和光流追踪(核心)
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         ROS_DEBUG("processing camera %d", i);
-        if (i != 1 || !STEREO_TRACK)
+        if (i != 1 || !STEREO_TRACK) //单目时：FeatureTracker::readImage() 函数读取图像数据进行处理
+            //readImage()这个函数实现了特征的处理和光流的追踪，里面基本上调用了feature_tracker.cpp里面的全部函数
+            //readImage()传了2个参数，当前帧的图像和当前帧的时间戳
             trackerData[i].readImage(ptr->image.rowRange(ROW * i, ROW * (i + 1)), img_msg->header.stamp.toSec());
         else
         {
-            if (EQUALIZE)
+            if (EQUALIZE) //判断是否对图像进行自适应直方图均衡化
             {
                 cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
                 clahe->apply(ptr->image.rowRange(ROW * i, ROW * (i + 1)), trackerData[i].cur_img);
@@ -113,23 +123,25 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 #endif
     }
 
+    // 对新加入的特征点更新全局id
     for (unsigned int i = 0;; i++)
     {
         bool completed = false;
         for (int j = 0; j < NUM_OF_CAM; j++)
             if (j != 1 || !STEREO_TRACK)
                 completed |= trackerData[j].updateID(i);
-        if (!completed)
-            break;
+        if (!completed) // completed(或者是update())如果是true，说明没有更新完id，则持续循环，如果是false，说明更新完了则跳出循环
+            break; 
     }
 
+    //6. 特征点的发布
    if (PUB_THIS_FRAME)
    {
         pub_count++;
-        sensor_msgs::PointCloudPtr feature_points(new sensor_msgs::PointCloud);
+        sensor_msgs::PointCloudPtr feature_points(new sensor_msgs::PointCloud); //归一化坐标
         sensor_msgs::ChannelFloat32 id_of_point;
-        sensor_msgs::ChannelFloat32 u_of_point;
-        sensor_msgs::ChannelFloat32 v_of_point;
+        sensor_msgs::ChannelFloat32 u_of_point; //像素坐标x
+        sensor_msgs::ChannelFloat32 v_of_point; //像素坐标y
         sensor_msgs::ChannelFloat32 velocity_x_of_point;
         sensor_msgs::ChannelFloat32 velocity_y_of_point;
 
@@ -139,29 +151,29 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         vector<set<int>> hash_ids(NUM_OF_CAM);
         for (int i = 0; i < NUM_OF_CAM; i++)
         {
-            auto &un_pts = trackerData[i].cur_un_pts;
-            auto &cur_pts = trackerData[i].cur_pts;
+            auto &un_pts = trackerData[i].cur_un_pts; //归一化坐标
+            auto &cur_pts = trackerData[i].cur_pts;   //像素坐标
             auto &ids = trackerData[i].ids;
             auto &pts_velocity = trackerData[i].pts_velocity;
             for (unsigned int j = 0; j < ids.size(); j++)
             {
-                if (trackerData[i].track_cnt[j] > 1)
+                if (trackerData[i].track_cnt[j] > 1)  //只发布追踪次数大于1的特征点
                 {
                     int p_id = ids[j];
                     hash_ids[i].insert(p_id);
-                    geometry_msgs::Point32 p;
+                    geometry_msgs::Point32 p;  //归一化坐标
                     p.x = un_pts[j].x;
                     p.y = un_pts[j].y;
                     p.z = 1;
 
-                    feature_points->points.push_back(p);
+                    feature_points->points.push_back(p);  //归一化坐标
                     id_of_point.values.push_back(p_id * NUM_OF_CAM + i);
-                    u_of_point.values.push_back(cur_pts[j].x);
-                    v_of_point.values.push_back(cur_pts[j].y);
+                    u_of_point.values.push_back(cur_pts[j].x); //像素坐标
+                    v_of_point.values.push_back(cur_pts[j].y); //像素坐标
                     velocity_x_of_point.values.push_back(pts_velocity[j].x);
                     velocity_y_of_point.values.push_back(pts_velocity[j].y);
                 }
-            }
+            } //将特征点id，矫正后归一化平面的3D点(x,y,z=1)，像素2D点(u,v)，像素的速度(vx,vy)，封装成sensor_msgs::PointCloudPtr类型的feature_points实例中,发布到pub_img
         }
         feature_points->channels.push_back(id_of_point);
         feature_points->channels.push_back(u_of_point);
@@ -169,6 +181,8 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         feature_points->channels.push_back(velocity_x_of_point);
         feature_points->channels.push_back(velocity_y_of_point);
         ROS_DEBUG("publish %f, at %f", feature_points->header.stamp.toSec(), ros::Time::now().toSec());
+        
+        // /如果是第一帧的话，不发布数据
         // skip the first image; since no optical speed on frist image
         if (!init_pub)
         {
@@ -177,6 +191,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         else
             pub_img.publish(feature_points);
 
+        // 7. 将图像封装到cv_bridge::cvtColor类型的ptr实例中发布到pub_match
         if (SHOW_TRACK)
         {
             ptr = cv_bridge::cvtColor(ptr, sensor_msgs::image_encodings::BGR8);
