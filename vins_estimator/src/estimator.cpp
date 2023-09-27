@@ -900,7 +900,7 @@ void Estimator::optimization()
                     f_td->check(para);
                     */
             }
-            else /在没有同步误差的情况下
+            else //在没有同步误差的情况下
             {
                 ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);
                 problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]);

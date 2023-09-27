@@ -179,8 +179,6 @@ void FeatureTracker::readImage(const cv::Mat &_img, double _cur_time)
 // 然后再用findFundamentalMat()找outlier。它之所以这么做，是因为需要一个去畸变的过程，
 // 在m_camera->liftProjective()里实现，m_camera是定义在camera.h的一个父类的对象，
 // 下面有多个相机模型的子类，例如在PinholeCamera.cc里，这里面就重写liftProjective()了方法，实现了去畸变的功能。
-
-原文链接：https://blog.csdn.net/iwanderu/article/details/104618993
 void FeatureTracker::rejectWithF() //通过基本矩阵（F）去除外点outliers
 {
     if (forw_pts.size() >= 8)
